@@ -26,9 +26,9 @@ const HIP_Y = GROUND - L1 - L2 - 14;
 const STEP = 1 / 120;
 
 // Hip movement
-const ACC = 4400, MAX_V = 540, MIN_SEP = 110;
-// Backing off is a little quicker than advancing
-const BACK_BOOST = 1.2;
+const ACC = 6400, MAX_V = 700, MIN_SEP = 110;
+// Backing off is quicker than advancing
+const BACK_BOOST = 1.5;
 // The arena extends half a screen past each edge; the camera follows the fighters
 const WORLD_L = -W / 2, WORLD_R = W * 1.5;
 const MAX_SEP = W - 160;
@@ -53,6 +53,22 @@ const A3_MIN = -0.6, A3_MAX = 0.9;
 // into the opponent does nothing and a full swing hurts a lot
 const MIN_SWING = 700;
 const HIT_COOLDOWN = 0.35;
+// A kick that snaps all the way out without connecting leaves the leg
+// overextended: slow, heavy and open. Hitting someone mid-kick or
+// overextended is a counter-hit and does extra damage.
+const OVER_T = 0.5, OVER_WEAK = 0.2;
+// Kicking plants you: you can't keep charging forward while the leg goes out
+const KICK_MAX_V = 160;
+// With the foot cocked back you shuffle; the unloaded fighter can outpace you
+const COCK_A2 = 1.2, COCK_SLOW = 0.5;
+// Knee check: snapping the knee up with the shin hanging blocks kicks to the
+// shin for a short window. The kicker eats some of the damage and is left
+// jammed. Hold the knee up longer and it stops blocking (lower it and raise
+// it again to re-arm), and you move slowly the whole time it's up.
+const CHECK_A1 = 0.8, CHECK_A2 = 0.6, CHECK_WINDOW = 0.45, CHECK_SLOW = 0.45, CHECK_RECOIL = 0.4;
+const kneeUp = f => f.a1 > CHECK_A1 && f.a2 > CHECK_A2;
+const isChecking = f => kneeUp(f) && f.checkT < CHECK_WINDOW && !f.swing && f.over <= 0;
+const COUNTER_MULT = 1.5, HIT_STUN = 0.2;
 
 // ---------- Canvas ----------
 const canvas = document.getElementById("game");
@@ -103,6 +119,7 @@ function makeFighter(x, dir, look) {
     a3: 0, w3: 0,
     hp: 100, shownHp: 100,
     hitCd: 0, flash: 0,
+    swing: false, over: 0, checkT: 0,
     input: {},
     look,
   };
@@ -142,12 +159,16 @@ function stepFighter(f, dt) {
   const i = f.input;
 
   // Hip slides left/right
+  const m = f.over > 0 ? OVER_WEAK : 1;
+  f.checkT = kneeUp(f) ? f.checkT + dt : 0;
+  const vCap = kneeUp(f) ? CHECK_SLOW : f.a2 > COCK_A2 ? COCK_SLOW : 1;
+  const mv = m * vCap;
   let ax = 0;
-  if (i.fwd) ax += f.dir * ACC;
-  if (i.back) ax -= f.dir * ACC * BACK_BOOST;
+  if (i.fwd) ax += f.dir * ACC * mv;
+  if (i.back) ax -= f.dir * ACC * BACK_BOOST * mv;
   if (ax) f.vx += ax * dt;
   else f.vx *= Math.exp(-14 * dt);
-  const fwdV = Math.max(-MAX_V * BACK_BOOST, Math.min(MAX_V, f.vx * f.dir));
+  const fwdV = Math.max(-MAX_V * BACK_BOOST * vCap, Math.min(i.ext ? KICK_MAX_V : MAX_V * vCap, f.vx * f.dir));
   f.vx = fwdV * f.dir;
   // Knockback can exceed walking speed; let it bleed off
   f.x += f.vx * dt;
@@ -156,14 +177,14 @@ function stepFighter(f, dt) {
   const s = f.a1 - f.a2;
   // Gravity pulls each segment toward vertical; each joint's motion drives the other
   let alpha1 = -G1 * Math.sin(f.a1) - D1 * f.w1
-    + (i.up ? M_UP : 0) - (i.down ? M_DOWN : 0)
-    + (i.ext && f.a2 > 0.05 ? M_KICK_HIP : 0)
+    + m * ((i.up ? M_UP : 0) - (i.down ? M_DOWN : 0)
+      + (i.ext && f.a2 > 0.05 ? M_KICK_HIP : 0))
     - C_KNEE_TO_HIP * f.w2;
   let alpha2 = G2 * Math.sin(s) - D2 * f.w2
-    + (i.bend ? M_BEND : 0) - (i.ext ? M_EXT : 0)
+    + m * ((i.bend ? M_BEND : 0) - (i.ext ? M_EXT : 0))
     - C_HIP_TO_KNEE * f.w1;
-  if (!i.up && !i.down && !i.ext) alpha1 += -K_REC * (f.a1 - REST_A1) - C_REC * f.w1;
-  if (!i.bend && !i.ext) alpha2 += -K_REC * (f.a2 - REST_A2) - C_REC * f.w2;
+  if (!i.up && !i.down && !i.ext) alpha1 += m * (-K_REC * (f.a1 - REST_A1) - C_REC * f.w1);
+  if (!i.bend && !i.ext) alpha2 += m * (-K_REC * (f.a2 - REST_A2) - C_REC * f.w2);
   // Foot flops: spring back to neutral, resist changes in shin angle
   const alphaS = alpha1 - alpha2;
   const alpha3 = -K3 * f.a3 - D3 * f.w3 + 0.7 * alphaS;
@@ -177,6 +198,22 @@ function stepFighter(f, dt) {
 
   f.hitCd = Math.max(0, f.hitCd - dt);
   f.flash = Math.max(0, f.flash - dt);
+  f.over = Math.max(0, f.over - dt);
+}
+
+// A fast extension commits to the kick; reaching full extension with the
+// kick still live means it whiffed
+function trackSwing(f, dt) {
+  const t = f.pose.T, pt = f.prevSamples[4];
+  const speed = Math.hypot(t.x - pt.x - (f.x - f.prevX), t.y - pt.y) / dt;
+  if (speed > MIN_SWING && f.w2 < 0 && f.input.ext && f.hitCd <= 0) f.swing = true;
+  else if (f.swing && f.w2 >= 0 && f.a2 > 0.15) f.swing = false;
+  if (f.swing && f.a2 < 0.12) {
+    f.swing = false;
+    f.over = OVER_T;
+    f.vx += f.dir * 140;   // the miss drags the hip forward
+    popups.push({ x: t.x, y: t.y - 14, text: "MISS", life: 0.6, color: "#aaa" });
+  }
 }
 
 // ---------- Geometry ----------
@@ -227,6 +264,7 @@ function checkHit(att, def, dt) {
         att.vx -= att.dir * 260; def.vx += att.dir * 260;
         att.w2 = Math.abs(att.w2) * 0.4; def.w2 = Math.abs(def.w2) * 0.4;
         att.hitCd = def.hitCd = 0.25;
+        att.swing = def.swing = false;
         sparks(pt.x, pt.y, 10, "#9cf", 260);
         playHit(0, true);
         return;
@@ -236,7 +274,28 @@ function checkHit(att, def, dt) {
     for (const part of parts) {
       if (distToSeg(pt, part.a, part.b) < part.r + 9) {
         if (speed < MIN_SWING) continue;
-        const dmg = Math.min(18, 1 + (speed - MIN_SWING) / 450);
+        if (part.name === "shin" && isChecking(def)) {
+          // Checked: the kick slams into a raised shin
+          const recoil = Math.min(8, (1 + (speed - MIN_SWING) / 450) * CHECK_RECOIL);
+          att.hp = Math.max(0, att.hp - recoil);
+          att.vx -= att.dir * 380;
+          att.w2 = Math.abs(att.w2) * 0.3;
+          att.swing = false;
+          att.over = OVER_T;
+          att.hitCd = HIT_COOLDOWN;
+          att.flash = 0.12;
+          def.vx += att.dir * 80;
+          def.w1 -= speed * 0.0008;
+          def.hitCd = 0;
+          shake = 5;
+          hitStop = 0.05;
+          sparks(pt.x, pt.y, 12, "#fff", 240);
+          popups.push({ x: pt.x, y: pt.y - 20, text: "CHECK", life: 0.8, color: "#9dff6a" });
+          playHit(recoil, true);
+          return;
+        }
+        const counter = def.over > 0 || def.swing;
+        const dmg = Math.min(18, 1 + (speed - MIN_SWING) / 450) * (counter ? COUNTER_MULT : 1);
         def.hp = Math.max(0, def.hp - dmg);
         def.vx += att.dir * Math.min(650, speed * 0.15);
         def.w1 -= speed * 0.002;          // knock the knee back
@@ -244,11 +303,15 @@ function checkHit(att, def, dt) {
         att.w2 = Math.abs(att.w2) * 0.3;  // foot rebounds
         att.vx -= att.dir * 120;
         att.hitCd = HIT_COOLDOWN;
+        att.swing = false; att.over = 0;
+        def.swing = false; def.over = 0;
+        def.hitCd = Math.max(def.hitCd, HIT_STUN);   // no trading back instantly
         def.flash = 0.18;
         shake = Math.min(14, 3 + dmg * 0.6);
-        hitStop = Math.min(0.09, 0.02 + dmg * 0.003);
+        hitStop = Math.min(0.09, 0.02 + dmg * 0.003) + (counter ? 0.05 : 0);
         sparks(pt.x, pt.y, 8 + Math.floor(dmg), "#ffd34d", 200 + speed * 0.08);
         popups.push({ x: pt.x, y: pt.y - 10, text: Math.round(dmg), life: 0.8, big: dmg >= 12 });
+        if (counter) popups.push({ x: pt.x, y: pt.y - 40, text: "COUNTER", life: 0.9, color: "#5ad1ff" });
         if (dmg >= 12) cheerT = clock;
         playHit(dmg, false);
         return;
@@ -258,39 +321,71 @@ function checkHit(att, def, dt) {
 }
 
 // ---------- AI ----------
-const brain = { state: "approach", t: 0, wait: 0.6, kneeTarget: 1.0, range: 220, flick: false };
+const brain = { state: "approach", t: 0, wait: 0.6, kneeTarget: 1.0, range: 220, flick: false, feint: false, wary: false };
+
+// Later opponents react faster, feint more and punish more reliably
+function aiSkill() {
+  return 0.3 + 0.7 * game.stage / Math.max(1, game.ladder.length - 1);
+}
 
 function aiSet(state) {
   brain.state = state;
   brain.t = 0;
   if (state === "approach") brain.wait = 0.15 + Math.random() * 0.9;
+  if (state === "feint") brain.wait = 0.25 + Math.random() * 0.3;
   if (state === "chamber") {
     // Mostly the low draw-back-and-swing; sometimes a raised-knee kick
     brain.flick = Math.random() < 0.65;
+    const skill = aiSkill();
+    brain.feint = Math.random() < 0.15 + 0.3 * skill;
+    brain.wary = Math.random() < 0.2 + 0.7 * skill;   // notices a raised knee in time
+    // Sloppier fighters misjudge range and whiff more
+    const slop = Math.random() * (1.6 - skill);
     if (brain.flick) {
       brain.kneeTarget = 0.1 + Math.random() * 0.3;
-      brain.range = 200 + Math.random() * 70;
+      brain.range = 195 + 50 * slop;
     } else {
       brain.kneeTarget = 0.6 + Math.random() * 0.9;
-      brain.range = 232 * Math.sin(brain.kneeTarget) + 5 + Math.random() * 30;
+      brain.range = 232 * Math.sin(brain.kneeTarget) - 10 + 35 * slop;
     }
+  }
+  if (state === "punish") {
+    brain.flick = true;
+    brain.feint = false;
+    brain.kneeTarget = 0.2;
   }
 }
 
 function aiThink(f, o, dt) {
   const i = f.input = {};
   const dist = Math.abs(o.x - f.x);
-  const threat = dist < 300 && o.a2 > 1.1;
+  const skill = aiSkill();
+  const threat = dist < 300 && (o.a2 > 1.1 || o.swing);
+  const busy = brain.state === "kick" || brain.state === "punish";
+  const room = f.dir < 0 ? WORLD_R - f.x : f.x - WORLD_L;
+  const cornered = room < 130;
   brain.t += dt;
+
+  // Reactions: jump on a whiffed kick, back off from a loaded one
+  // (or, with nowhere to back off to, load up and fight)
+  const lowThreat = dist < 270 && o.a1 < 0.6 && (o.swing || o.a2 > 1.3);
+  const staleCheck = kneeUp(o) && !isChecking(o);
+  if (!busy && o.over > 0 && dist < 330 && Math.random() < dt * (4 + 8 * skill)) aiSet("punish");
+  else if (!busy && staleCheck && dist < 300 && Math.random() < dt * (2 + 6 * skill)) aiSet("punish");
+  else if (!busy && brain.state !== "check" && f.over <= 0 && lowThreat
+    && Math.random() < dt * (1 + 5 * skill) * (room < 320 ? 2 : 1)) aiSet("check");
+  else if (!busy && brain.state !== "retreat" && threat && Math.random() < dt * (2 + 6 * skill))
+    aiSet(room < 320 ? "punish" : "retreat");
 
   switch (brain.state) {
     case "approach": {
-      const want = 232 * Math.sin(1.0) + 10;
+      // Hover just outside their reach, then step in to attack
+      const want = 265;
       if (dist > want + 15) i.fwd = true;
-      else if (dist < want - 50) i.back = true;
+      else if (dist < want - 25 && room > 320) i.back = true;   // don't give up the last of the floor
       i.bend = f.a2 < 0.4;
-      if (threat && Math.random() < dt * 4) aiSet("retreat");
-      else if (dist < want + 60 && brain.t > brain.wait) aiSet("chamber");
+      if (cornered && dist < 300) aiSet(lowThreat ? "check" : "punish");
+      else if (dist < want + 50 && brain.t > brain.wait) aiSet("chamber");
       break;
     }
     case "chamber": {
@@ -299,27 +394,69 @@ function aiThink(f, o, dt) {
       i.bend = true;
       if (dist > brain.range + 30) i.fwd = true;
       else if (dist < brain.range - 40) i.back = true;
-      const ready = f.a2 > 1.6 && Math.abs(f.a1 - brain.kneeTarget) < 0.25 && Math.abs(dist - brain.range) < 45;
-      if (ready || brain.t > 0.9) aiSet("kick");
+      const off = dist - brain.range;
+      const ready = f.a2 > 1.6 && Math.abs(f.a1 - brain.kneeTarget) < 0.25 && off > -45 && off < 10 + 35 * (1 - skill);
+      if (ready && brain.feint) aiSet("feint");
+      else if (ready && isChecking(o) && brain.wary) { /* hold it and wait out their check */ }
+      else if (ready) aiSet("kick");
+      else if (brain.t > 0.9) aiSet(Math.random() < skill ? "approach" : "kick");
+      break;
+    }
+    case "feint": {
+      // Show the loaded leg, then drop it and see if they bite
+      if (brain.t < 0.12) i.fwd = true;
+      else if (brain.t < 0.3) i.back = true;
+      i.down = f.a1 > 0.3;
+      if (brain.t > brain.wait) {
+        aiSet(Math.random() < 0.5 ? "chamber" : "approach");
+        brain.wait *= 0.3;
+      }
+      break;
+    }
+    case "check": {
+      // Snap the knee up with the shin hanging, then drop it once it goes stale
+      i.up = f.a1 < 1.1;
+      i.down = f.a1 > 1.35;
+      i.bend = f.a2 < 1.0;
+      if (brain.t > CHECK_WINDOW + 0.1) aiSet(threat && room > 320 ? "retreat" : "approach");
+      break;
+    }
+    case "punish": {
+      i.bend = true;
+      i.down = f.a1 > 0.4;
+      if (dist > 225) i.fwd = true;
+      // Caught still loading by a low kick: raising the knee is quicker
+      if (f.a2 < 1.0 && lowThreat && o.swing && o.over <= 0 && Math.random() < skill) { aiSet("check"); break; }
+      if (f.a2 > 1.3 && dist < 245) { brain.range = dist; aiSet("kick"); }
+      else if (brain.t > 0.5) aiSet("approach");
       break;
     }
     case "kick": {
       i.ext = true;
       i.up = !brain.flick && f.a1 < brain.kneeTarget;
       if (dist > brain.range) i.fwd = true;
-      if (f.a2 < 0.08 || brain.t > 0.35) aiSet("recover");
+      if (f.a2 < 0.08 || f.hitCd > 0 || brain.t > 0.35) aiSet("recover");
       break;
     }
     case "recover": {
-      if (brain.t < 0.25) i.back = Math.random() < 0.8;
+      if (cornered && dist < 300 && f.over <= 0) { aiSet(lowThreat ? "check" : "punish"); break; }
+      if (brain.t < 0.25) i.back = room > 320 && Math.random() < 0.8;
       i.down = f.a1 > 0.4;
       if (brain.t > 0.3 + Math.random() * 0.3) aiSet(Math.random() < 0.25 ? "chamber" : "approach");
       break;
     }
     case "retreat": {
+      // Back off with the foot down so you're quick; load up once clear
       i.back = true;
-      i.bend = true;
+      i.bend = dist > 300;
       i.down = f.a1 > 0.3;
+      // They're walking in loaded: kick into their windup
+      if (f.a2 > 1.4 && dist < 235 && o.a2 > 1.1 && Math.random() < dt * 10 * skill) {
+        brain.flick = true; brain.range = dist; aiSet("kick");
+        break;
+      }
+      if (cornered) { aiSet(lowThreat ? "check" : "punish"); break; }
+      if (threat && dist < 290 && brain.t < 0.8) break;
       if (brain.t > 0.3 + Math.random() * 0.2) aiSet(Math.random() < 0.55 ? "chamber" : "approach");
       break;
     }
@@ -336,8 +473,8 @@ function shade(hex, k) {
 const ROSTER = [
   { name: "Dmitri Valk", stage: "harbor", quote: "There is no victory. There is only next winter.",
     skin: "#f3d2b3", shoe: "#2f7bff", trim: "#bcd6ff" },
-  { name: "Okonkwo Steel", stage: "mine", quote: "Try all you like, you can't beat STEEL!",
-    skin: "#5c3a24", shoe: "#e0a020", trim: "#ffe39a" },
+  { name: "U.S. Steel", stage: "mine", quote: "Try all you like, you can't beat STEEL!",
+    skin: "#5c3a24", shoe: "#e0a020", trim: "#ffe39a", piping: ["#c8102e", "#ffffff", "#0a3161"] },
   { name: "Sister Mercy Vance", stage: "cathedral", quote: "May God have mercy on your knees. I shall not.",
     skin: "#c68642", shoe: "#c1121f", trim: "#ffb3b8" },
   { name: "Sgt. Graves", stage: "battlefield", quote: "This ain't my war, but I'm going to win it anyway.",
@@ -526,8 +663,12 @@ function update(dt) {
   camX += (camTarget - camX) * Math.min(1, dt * 10);
 
   if (game.state === "fight") {
-    checkHit(player, cpu, dt);
-    checkHit(cpu, player, dt);
+    // Alternate who's checked first so neither side wins every same-frame trade
+    const [a, b] = Math.random() < 0.5 ? [player, cpu] : [cpu, player];
+    checkHit(a, b, dt);
+    checkHit(b, a, dt);
+    trackSwing(player, dt);
+    trackSwing(cpu, dt);
     if (player.hp <= 0 || cpu.hp <= 0) {
       game.state = "over";
       game.t = 0;
@@ -1271,7 +1412,8 @@ function drawFighter(f) {
   limb(p.H, p.K, 42, dark);
   // Shin stops short of the ankle so its rounded end stays inside the shoe
   const shinEnd = lerpPt(p.A, p.K, 0.12);
-  limb(p.K, shinEnd, 34, dark);
+  // A live knee check lights up the shin
+  limb(p.K, shinEnd, 34, isChecking(f) ? "#d8ffc4" : dark);
   limb(p.H, p.K, 36, skin);
   limb(p.K, shinEnd, 28, skin);
 
@@ -1306,8 +1448,17 @@ function drawFighter(f) {
   ctx.beginPath();
   ctx.roundRect(-30, -60, 60, 82, 8);
   ctx.fill();
-  ctx.fillStyle = L.trim;
-  ctx.fillRect(-30, 16, 60, 5);
+  if (L.piping) {
+    // One stripe of side-by-side colors straight down the middle
+    const w = 4, x0 = -w * L.piping.length / 2;
+    L.piping.forEach((c, k) => {
+      ctx.fillStyle = c;
+      ctx.fillRect(x0 + k * w, -60, w, 82);
+    });
+  } else {
+    ctx.fillStyle = L.trim;
+    ctx.fillRect(-30, 16, 60, 5);
+  }
   ctx.restore();
 }
 
@@ -1375,11 +1526,11 @@ function render() {
 
   for (const p of popups) {
     ctx.globalAlpha = Math.min(1, p.life * 2);
-    ctx.font = `900 ${p.big ? 30 : 22}px Impact, "Arial Black", sans-serif`;
+    ctx.font = `900 ${p.big ? 30 : p.color ? 18 : 22}px Impact, "Arial Black", sans-serif`;
     ctx.textAlign = "center";
     ctx.lineWidth = 4; ctx.strokeStyle = "#000";
     ctx.strokeText(p.text, p.x, p.y);
-    ctx.fillStyle = p.big ? "#ff5a3c" : "#fff";
+    ctx.fillStyle = p.color || (p.big ? "#ff5a3c" : "#fff");
     ctx.fillText(p.text, p.x, p.y);
   }
   ctx.globalAlpha = 1;
@@ -1397,7 +1548,7 @@ function render() {
 
   ctx.font = "13px monospace";
   ctx.fillStyle = "rgba(255,255,255,0.45)";
-  ctx.fillText("← →  move     ↑ ↓  raise / lower knee     A  draw foot back     D  kick out", W / 2, H - 22);
+  ctx.fillText("← →  move     ↑ ↓  raise / lower knee (up blocks low kicks)     A  draw foot back     D  kick out", W / 2, H - 22);
 
   const hint = text => {
     ctx.font = "bold 16px monospace";
