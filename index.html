@@ -507,12 +507,12 @@ function shade(hex, k) {
 }
 
 const ROSTER = [
-  { name: "Dmitri Valk", stage: "harbor", quote: "There is no victory. There is only next winter.",
-    skin: "#f3d2b3", shoe: "#2f7bff", trim: "#bcd6ff" },
+  { name: "Dmitri Ivanov", stage: "harbor", quote: "There is no victory. There is only next winter.",
+    skin: "#f3d2b3", shoe: "#c1121f", trim: "#ffb3b8" },
   { name: "U.S. Steel", stage: "mine", quote: "Try all you like, you can't beat STEEL!",
     skin: "#5c3a24", shoe: "#e0a020", trim: "#ffe39a", piping: ["#c8102e", "#ffffff", "#0a3161"] },
   { name: "Sister Mercy Vance", stage: "cathedral", quote: "May God have mercy on your knees. I shall not.",
-    skin: "#c68642", shoe: "#c1121f", trim: "#ffb3b8" },
+    skin: "#c68642", shoe: "#2f7bff", trim: "#bcd6ff" },
   { name: "Sgt. Graves", stage: "battlefield", quote: "This ain't my war, but I'm going to win it anyway.",
     skin: "#8d5524", shoe: "#2a9d8f", trim: "#a8f0e6" },
   { name: "Renata Cruz", stage: "rooftop", quote: "With this victory, my brother's debt is paid in full.",
@@ -523,8 +523,8 @@ const ROSTER = [
     skin: "#3b2219", shoe: "#ff7a00", trim: "#ffd1a3" },
   { name: "Serpentra", stage: "pit", quote: "You cannot run from Serpentra's embrace!",
     skin: "#ffe3cf", shoe: "#3fbf5f", trim: "#bff5cb" },
-  { name: "Father Solomon Achebe", stage: "garden", quote: "I would prefer not to provide a quote at this time.",
-    skin: "#6f4a2f", shoe: "#ff3b8b", trim: "#ffc2da" },
+  { name: "Father Sean O'Malley", stage: "garden", quote: "Forgive me, son. The parish roof won't fix itself.",
+    skin: "#f0bfa0", shoe: "#2b2b2b", trim: "#ffffff", accent: "#cfcfcf" },
 ];
 for (const r of ROSTER) r.skinDark = shade(r.skin, 0.8);
 
@@ -1517,7 +1517,7 @@ function drawHealth(f, x, alignRight) {
   if (alignRight) ctx.fillRect(x + w - real, y, real, h); else ctx.fillRect(x, y, real, h);
   ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
 
-  ctx.fillStyle = f.look.shoe;
+  ctx.fillStyle = f.look.accent || f.look.shoe;
   ctx.font = "bold 16px monospace";
   ctx.textAlign = alignRight ? "right" : "left";
   ctx.fillText(f.look.name, alignRight ? x + w : x, y + h + 22);
@@ -1605,7 +1605,7 @@ function render() {
   const winQuote = f => {
     ctx.font = "italic 18px Georgia, serif";
     ctx.textAlign = "center";
-    ctx.fillStyle = f.look.shoe;
+    ctx.fillStyle = f.look.accent || f.look.shoe;
     ctx.fillText(`${f.look.name}: “${f.look.quote}”`, W / 2, 330);
   };
   const round = game.wins[0] + game.wins[1] + 1;
@@ -1644,7 +1644,7 @@ function render() {
     ctx.fillStyle = "rgba(0,0,0,0.7)";
     ctx.fillRect(0, 0, W, H);
     bigText("CHAMPION", 100, "#ffd400", 220);
-    bigText(player.look.name.toUpperCase(), 40, player.look.shoe, 280);
+    bigText(player.look.name.toUpperCase(), 40, player.look.accent || player.look.shoe, 280);
     ctx.font = "italic 16px Georgia, serif";
     ctx.fillStyle = "#bbb";
     ctx.textAlign = "center";
@@ -1702,7 +1702,7 @@ function renderSelect() {
     const c = cellRect(i), r = ROSTER[i], on = i === selIndex;
     ctx.fillStyle = on ? "#1c1c1c" : "#0d0d0d";
     ctx.fillRect(c.x, c.y, c.w, c.h);
-    ctx.strokeStyle = on ? r.shoe : "#333";
+    ctx.strokeStyle = on ? r.accent || r.shoe : "#333";
     ctx.lineWidth = on ? 3 : 1;
     ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1);
 
@@ -1728,7 +1728,7 @@ function renderSelect() {
   ctx.textAlign = "center";
   ctx.lineWidth = 6; ctx.strokeStyle = "#000";
   ctx.strokeText(r.name.toUpperCase(), px + pw / 2, 436);
-  ctx.fillStyle = r.shoe;
+  ctx.fillStyle = r.accent || r.shoe;
   ctx.fillText(r.name.toUpperCase(), px + pw / 2, 436);
 
   ctx.font = "italic 15px Georgia, serif";
